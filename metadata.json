@@ -1,0 +1,8 @@
+{
+  "name": "WS Studio",
+  "description": "4K HD dark premium CapCut-style video editor and multi-model AI Hub suite",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
