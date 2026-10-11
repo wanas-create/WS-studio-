@@ -1,9 +1,5 @@
-name: Build APK
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
-
+name: Build WS-Studio APK
+on: [push]
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -11,15 +7,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.0'
+          flutter-version: '3.22.2'
           channel: 'stable'
       - run: flutter pub get
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
-          name: app-release
+          name: WS-Studio-APK
           path: build/app/outputs/flutter-apk/app-release.apk
