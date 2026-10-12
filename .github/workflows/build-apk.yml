@@ -14,71 +14,38 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
+          cache: 'gradle'
 
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.22.2'
-          channel: 'stable'
-          cache: true
-
-      - name: Locate Flutter Project
-        id: locate-project
+      - name: Prepare environment configuration
         run: |
-          echo "Inspecting repository for Flutter project..."
-          KNOWN_PATHS=("." "ws_studio" "ws-studio" "app" "flutter_app" "flutter")
-          FLUTTER_DIR=""
-
-          for dir in "${KNOWN_PATHS[@]}"; do
-            if [ -f "$dir/pubspec.yaml" ]; then
-              FLUTTER_DIR="$dir"
-              echo "Found pubspec.yaml in: $dir"
-              break
-            fi
-          done
-
-          if [ -z "$FLUTTER_DIR" ]; then
-            echo "::error::pubspec.yaml not found! Checked known paths: ${KNOWN_PATHS[*]}."
-            echo "Error: Expected to find Flutter project root with pubspec.yaml in current directory or known subdirectories."
-            echo "Please ensure pubspec.yaml exists in your repository root or a valid app subfolder."
-            exit 1
+          if [ ! -f ".env" ] && [ -f ".env.example" ]; then
+            cp .env.example .env
+          elif [ ! -f ".env" ]; then
+            touch .env
           fi
 
-          echo "FLUTTER_DIR=$FLUTTER_DIR" >> "$GITHUB_ENV"
-
-      - name: Install Dependencies
+      - name: Restore debug keystore
         run: |
-          cd "$FLUTTER_DIR"
-          echo "Running flutter pub get in $FLUTTER_DIR..."
-          flutter pub get
-
-      - name: Build Release APK
-        run: |
-          cd "$FLUTTER_DIR"
-          echo "Running flutter build apk --release..."
-          flutter build apk --release
-
-      - name: Verify and Locate APK
-        run: |
-          if [ -f "$FLUTTER_DIR/build/app/outputs/flutter-apk/app-release.apk" ]; then
-            echo "Found APK at: $FLUTTER_DIR/build/app/outputs/flutter-apk/app-release.apk"
-            echo "APK_PATH=$FLUTTER_DIR/build/app/outputs/flutter-apk/app-release.apk" >> "$GITHUB_ENV"
-          elif [ -f "build/app/outputs/flutter-apk/app-release.apk" ]; then
-            echo "Found APK at: build/app/outputs/flutter-apk/app-release.apk"
-            echo "APK_PATH=build/app/outputs/flutter-apk/app-release.apk" >> "$GITHUB_ENV"
-          else
-            echo "::error::Release APK was not generated at expected path."
-            exit 1
+          if [ -f "debug.keystore.base64" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f "debug.keystore" ]; then
+            keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Android APK with Gradle
+        run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: WS-Studio-APK
-          path: ${{ env.APK_PATH }}
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
