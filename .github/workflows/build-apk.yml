@@ -44,4 +44,4 @@ jobs:
           name: WS-Studio-APK
           path: |
             **/app-release.apk
-            **/app-debug.apk
+           **/app-debug.apk
