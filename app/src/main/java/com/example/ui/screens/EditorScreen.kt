@@ -30,9 +30,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.PlaybackParameters
+import androidx.media3.ui.PlayerView
 import com.example.model.*
 import com.example.ui.theme.*
+import com.example.util.VideoImportManager
 import kotlinx.coroutines.delay
 
 enum class EditorTool(val title: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
@@ -102,17 +105,19 @@ fun EditorScreen(
     ) { uri: Uri? ->
         if (uri != null) {
             val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "Gallery Video"
+            val realDurationMs = VideoImportManager.getRealDuration(context, uri)
+            val realDurationSec = realDurationMs / 1000.0f
             val newClip = VideoClip(
                 id = "clip_${System.currentTimeMillis()}",
                 title = fileName,
-                durationSec = 8.0f,
+                durationSec = realDurationSec,
                 videoUri = uri.toString(),
                 colorToneHex = 0xFF0D47A1
             )
             project = project.copy(
                 videoUri = uri.toString(),
                 videoFileName = fileName,
-                durationSec = 8.0f,
+                durationSec = realDurationSec,
                 clips = listOf(newClip)
             )
             currentPlayheadSec = 0f
@@ -120,6 +125,7 @@ fun EditorScreen(
             playerManager.initializePlayer(
                 videoUriString = uri.toString(),
                 initialSpeed = 1.0f,
+                playWhenReady = false,
                 onPlayStateChange = { playing -> isPlaying = playing }
             )
             showToastMessage = "Video loaded from gallery"
@@ -130,17 +136,30 @@ fun EditorScreen(
     LaunchedEffect(isPlaying, project.durationSec, selectedClipIndex, project.clips) {
         while (isPlaying && project.durationSec > 0) {
             delay(40) // 25 FPS live timeline progression
-            val activeClip = project.clips.getOrNull(selectedClipIndex) ?: project.clips.firstOrNull()
-            val speed = activeClip?.speed ?: 1.0f
-            val delta = 0.04f * speed
-            val nextTime = currentPlayheadSec + delta
-            if (nextTime >= project.durationSec) {
-                currentPlayheadSec = 0f
-                isPlaying = false
-                playerManager.pause()
-                playerManager.seekTo(0)
+            val playerPosMs = playerManager.exoPlayer?.currentPosition
+            if (playerPosMs != null && playerPosMs >= 0) {
+                val playerPosSec = (playerPosMs / 1000f).coerceIn(0f, project.durationSec)
+                if (playerPosSec >= project.durationSec && project.durationSec > 0) {
+                    currentPlayheadSec = 0f
+                    isPlaying = false
+                    playerManager.pause()
+                    playerManager.seekTo(0)
+                } else {
+                    currentPlayheadSec = playerPosSec
+                }
             } else {
-                currentPlayheadSec = nextTime
+                val activeClip = project.clips.getOrNull(selectedClipIndex) ?: project.clips.firstOrNull()
+                val speed = activeClip?.speed ?: 1.0f
+                val delta = 0.04f * speed
+                val nextTime = currentPlayheadSec + delta
+                if (nextTime >= project.durationSec) {
+                    currentPlayheadSec = 0f
+                    isPlaying = false
+                    playerManager.pause()
+                    playerManager.seekTo(0)
+                } else {
+                    currentPlayheadSec = nextTime
+                }
             }
         }
     }
@@ -260,7 +279,8 @@ fun EditorScreen(
                         project = project,
                         currentPlayheadSec = currentPlayheadSec,
                         isPlaying = isPlaying,
-                        selectedClipIndex = selectedClipIndex
+                        selectedClipIndex = selectedClipIndex,
+                        player = playerManager.exoPlayer
                     )
 
                     // Watermark status badge
@@ -315,6 +335,8 @@ fun EditorScreen(
                         val willPlay = !isPlaying
                         isPlaying = willPlay
                         if (willPlay) {
+                            val seekMs = (currentPlayheadSec * 1000).toLong()
+                            playerManager.seekTo(seekMs)
                             playerManager.play()
                         } else {
                             playerManager.pause()
@@ -349,7 +371,7 @@ fun EditorScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .windowInsetsPadding(WindowInsets.navigationBars)
+                        .navigationBarsPadding()
                 ) {
                     AnimatedContent(
                         targetState = activeTool,
@@ -406,6 +428,7 @@ fun EditorScreen(
                                 tool = tool,
                                 project = project,
                                 selectedClipIndex = selectedClipIndex,
+                                currentPlayheadSec = currentPlayheadSec,
                                 playerManager = playerManager,
                                 onClose = {
                                     // Bug 4: Clear tool selection and hide bottom sheet cleanly
@@ -607,7 +630,8 @@ fun VideoPreviewCanvas(
     project: VideoProject,
     currentPlayheadSec: Float,
     isPlaying: Boolean,
-    selectedClipIndex: Int
+    selectedClipIndex: Int,
+    player: androidx.media3.common.Player? = null
 ) {
     val activeClip = project.clips.getOrNull(selectedClipIndex) ?: project.clips.firstOrNull()
     val targetAspect = project.aspect.ratioWidth / project.aspect.ratioHeight
@@ -621,21 +645,39 @@ fun VideoPreviewCanvas(
             .border(1.dp, DarkBorder, RoundedCornerShape(12.dp)),
         contentAlignment = Alignment.Center
     ) {
-        val baseColor = Color(activeClip?.colorToneHex ?: 0xFF0D47A1)
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(
-                            baseColor,
-                            baseColor.copy(alpha = 0.65f),
-                            Color(0xFF04060A)
+        // Real ExoPlayer Video Surface
+        if (player != null && !project.videoUri.isNullOrEmpty()) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        useController = false
+                        resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        this.player = player
+                    }
+                },
+                update = { playerView ->
+                    if (playerView.player != player) {
+                        playerView.player = player
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            val baseColor = Color(activeClip?.colorToneHex ?: 0xFF0D47A1)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(
+                                baseColor,
+                                baseColor.copy(alpha = 0.65f),
+                                Color(0xFF04060A)
+                            )
                         )
                     )
-                )
-        )
+            )
+        }
 
         // Live visual filter overlay simulation based on active filter
         val filterName = activeClip?.filterName ?: "Normal"
@@ -657,9 +699,35 @@ fun VideoPreviewCanvas(
             )
         }
 
-        // Bug 6 Fix: Actual GL Shader visual simulation for active effect
-        val activeEffectName = project.effects.firstOrNull()?.name ?: activeClip?.effectName ?: "None"
-        if (activeEffectName != "None") {
+        // Effects shader visual simulation and overlay tint
+        val activeEffect = project.effects.firstOrNull { currentPlayheadSec >= it.startSec && currentPlayheadSec <= (it.startSec + it.durationSec) }
+            ?: project.effects.lastOrNull()
+            ?: if (activeClip?.effectName != null && activeClip.effectName != "None") EffectOverlay(id = "clip_fx", name = activeClip.effectName) else null
+
+        if (activeEffect != null) {
+            // Video brightness/contrast/mood tint overlay simulation
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        when {
+                            activeEffect.name.contains("Magnetic") || activeEffect.name.contains("Distortion") ->
+                                Color(0xFF00E5FF).copy(alpha = 0.22f)
+                            activeEffect.name.contains("Glitch") || activeEffect.name.contains("RGB") ->
+                                Color(0xFFFF0055).copy(alpha = 0.25f)
+                            activeEffect.name.contains("Neon") || activeEffect.name.contains("Bloom") || activeEffect.name.contains("Glow") ->
+                                Color(0xFF7C4DFF).copy(alpha = 0.28f)
+                            activeEffect.name.contains("VHS") || activeEffect.name.contains("CRT") || activeEffect.name.contains("Retro") ->
+                                Color(0xFFFFB300).copy(alpha = 0.22f)
+                            activeEffect.name.contains("Earthquake") || activeEffect.name.contains("Shake") ->
+                                Color(0xFFFF1744).copy(alpha = 0.22f)
+                            else -> Color(0xFF651FFF).copy(alpha = 0.20f)
+                        }
+                    )
+            )
+
+            // GL Shader visual simulation lines & glow
+            val activeEffectName = activeEffect.name
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val w = size.width
                 val h = size.height
@@ -712,41 +780,67 @@ fun VideoPreviewCanvas(
                     }
                 }
             }
+
+            // Show effect name on top of video preview
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 10.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color.Black.copy(alpha = 0.75f))
+                    .border(1.dp, AmberGold, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = AmberGold,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Effect: ${activeEffect.name}",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
         }
 
-        // Clip Title & Simulated Motion Elements for User Selected Video
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier.padding(12.dp)
-        ) {
-            Icon(
-                Icons.Default.MovieFilter,
-                contentDescription = null,
-                tint = Color.White.copy(alpha = 0.85f),
-                modifier = Modifier.size(44.dp)
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                activeClip?.title ?: "User Video Clip",
-                color = Color.White,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
-            )
-            // Bug 8 Fix: Display live updated speed from clip
-            val currentSpeedFormatted = String.format("%.2f", activeClip?.speed ?: 1.0f)
-            Text(
-                "Filter: $filterName • Speed: ${currentSpeedFormatted}x",
-                color = ElectricBlue,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium
-            )
+        // Show placeholder icon and title only if no real video is loaded
+        if (project.videoUri.isNullOrEmpty()) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.padding(12.dp)
+            ) {
+                Icon(
+                    Icons.Default.MovieFilter,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.85f),
+                    modifier = Modifier.size(44.dp)
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    activeClip?.title ?: "User Video Clip",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
 
-            // Bug 3 Fix: Single boolean isReversed strictly controls UI banner
-            val isReversed = activeClip?.isReversed == true
-            if (isReversed) {
-                Spacer(Modifier.height(4.dp))
+        // Bug 3 Fix: Single boolean isReversed strictly controls UI banner
+        val isReversed = activeClip?.isReversed == true
+        if (isReversed) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp)
+            ) {
                 Surface(
                     shape = RoundedCornerShape(4.dp),
                     color = AmberGold.copy(alpha = 0.25f),
@@ -1034,22 +1128,31 @@ fun MultiTrackTimeline(
                     Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = AmberGold, modifier = Modifier.size(14.dp))
                     Spacer(Modifier.width(6.dp))
                     if (project.effects.isNotEmpty()) {
-                        val fx = project.effects.first()
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(AmberGold)
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            ) {
-                                Text(fx.name, color = Color.Black, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            items(project.effects) { fx ->
+                                val startSec = fx.startSec.toInt()
+                                val endSec = (fx.startSec + fx.durationSec).toInt()
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(AmberGold)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        "${fx.name} ${startSec}s-${endSec}s",
+                                        color = Color.Black,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
-                            Spacer(Modifier.width(6.dp))
-                            Text("VFX Active (${fx.category})", color = AmberGold, fontSize = 9.sp, fontWeight = FontWeight.Medium)
                         }
                     } else {
                         Text(
-                            "No effects added (Tap Effects tool below)",
+                            "No effects added",
                             color = TextMuted,
                             fontSize = 9.sp
                         )
@@ -1140,6 +1243,7 @@ fun ToolDetailSubSheet(
     tool: EditorTool,
     project: VideoProject,
     selectedClipIndex: Int,
+    currentPlayheadSec: Float = 0f,
     playerManager: StudioPlayerManager,
     onClose: () -> Unit,
     onUpdateProject: (VideoProject) -> Unit,
@@ -1183,40 +1287,85 @@ fun ToolDetailSubSheet(
             Spacer(Modifier.height(8.dp))
 
             when (tool) {
-                // Bug 4 Fix: Dedicated Trim Settings Sheet that closes on Apply
+                // Trim Settings with start and end sliders, recalculating duration and closing sheet
                 EditorTool.TRIM -> {
-                    var trimDuration by remember(activeClip?.id, activeClip?.durationSec) {
-                        mutableFloatStateOf(activeClip?.durationSec ?: 5.0f)
+                    val clipDuration = (activeClip?.durationSec ?: 5.0f).coerceAtLeast(1.0f)
+                    var startSec by remember(activeClip?.id, activeClip?.startOffsetSec) {
+                        mutableFloatStateOf(activeClip?.startOffsetSec ?: 0f)
                     }
-                    val maxDuration = (activeClip?.durationSec ?: 5.0f).coerceAtLeast(1.0f)
+                    var endSec by remember(activeClip?.id, activeClip?.startOffsetSec, activeClip?.durationSec) {
+                        val initEnd = (activeClip?.startOffsetSec ?: 0f) + (activeClip?.durationSec ?: 5.0f)
+                        mutableFloatStateOf(initEnd.coerceAtMost(clipDuration))
+                    }
 
-                    Text(
-                        "Trim Clip Duration: ${String.format("%.1f", trimDuration)}s / ${String.format("%.1f", maxDuration)}s",
-                        color = ElectricBlue,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    val trimmedDuration = (endSec - startSec).coerceAtLeast(0.1f)
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Trim: ${String.format("%.1f", startSec)}s - ${String.format("%.1f", endSec)}s",
+                            color = ElectricBlue,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "Length: ${String.format("%.1f", trimmedDuration)}s",
+                            color = AmberGold,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+                    Text("Start point: ${String.format("%.1f", startSec)}s", color = TextSecondary, fontSize = 10.sp)
                     Slider(
-                        value = trimDuration,
-                        onValueChange = { trimDuration = it },
-                        valueRange = 0.5f..maxDuration,
+                        value = startSec,
+                        onValueChange = { 
+                            startSec = it.coerceAtMost((endSec - 0.2f).coerceAtLeast(0f))
+                        },
+                        valueRange = 0f..clipDuration,
                         colors = SliderDefaults.colors(thumbColor = ElectricBlue, activeTrackColor = CobaltBlue)
                     )
-                    Spacer(Modifier.height(6.dp))
+
+                    Text("End point: ${String.format("%.1f", endSec)}s", color = TextSecondary, fontSize = 10.sp)
+                    Slider(
+                        value = endSec,
+                        onValueChange = { 
+                            endSec = it.coerceAtLeast(startSec + 0.2f).coerceAtMost(clipDuration)
+                        },
+                        valueRange = 0f..clipDuration,
+                        colors = SliderDefaults.colors(thumbColor = AmberGold, activeTrackColor = AmberGold)
+                    )
+
+                    Spacer(Modifier.height(4.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Button(
                             onClick = {
+                                val sMs = (startSec * 1000f).toLong()
+                                val eMs = (endSec * 1000f).toLong()
+                                val newDurSec = (endSec - startSec).coerceAtLeast(0.1f)
                                 if (activeClip != null && selectedClipIndex in project.clips.indices) {
                                     val updatedClips = project.clips.mapIndexed { idx, c ->
-                                        if (idx == selectedClipIndex) c.copy(durationSec = trimDuration) else c
+                                        if (idx == selectedClipIndex) {
+                                            c.copy(
+                                                startOffsetSec = startSec,
+                                                durationSec = newDurSec,
+                                                startMs = sMs,
+                                                endMs = eMs
+                                            )
+                                        } else c
                                     }
-                                    onUpdateProject(project.copy(clips = updatedClips))
-                                    onShowToast("Trim applied: ${String.format("%.1f", trimDuration)}s")
-                                    onClose() // Bug 4 Fix: Closes sheet on apply
+                                    val newTotal = updatedClips.sumOf { it.durationSec.toDouble() }.toFloat()
+                                    onUpdateProject(project.copy(clips = updatedClips, durationSec = newTotal.coerceAtLeast(0.1f)))
+                                    onShowToast("Trim applied: ${String.format("%.1f", newDurSec)}s")
                                 }
+                                onClose() // Immediately closes sheet
                             },
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = CobaltBlue)
@@ -1225,8 +1374,25 @@ fun ToolDetailSubSheet(
                         }
                         OutlinedButton(
                             onClick = {
+                                val sMs = (startSec * 1000f).toLong()
+                                val eMs = (endSec * 1000f).toLong()
+                                val newDurSec = (endSec - startSec).coerceAtLeast(0.1f)
+                                val updatedClips = project.clips.map { c ->
+                                    val cDur = c.durationSec.coerceAtLeast(0.1f)
+                                    val safeEnd = endSec.coerceAtMost(cDur)
+                                    val safeStart = startSec.coerceAtMost((safeEnd - 0.1f).coerceAtLeast(0f))
+                                    val dur = (safeEnd - safeStart).coerceAtLeast(0.1f)
+                                    c.copy(
+                                        startOffsetSec = safeStart,
+                                        durationSec = dur,
+                                        startMs = (safeStart * 1000f).toLong(),
+                                        endMs = (safeEnd * 1000f).toLong()
+                                    )
+                                }
+                                val newTotal = updatedClips.sumOf { it.durationSec.toDouble() }.toFloat()
+                                onUpdateProject(project.copy(clips = updatedClips, durationSec = newTotal.coerceAtLeast(0.1f)))
                                 onShowToast("Trim applied to all clips")
-                                onClose() // Bug 4 Fix: Closes sheet
+                                onClose() // Immediately closes sheet
                             },
                             modifier = Modifier.weight(1f)
                         ) {
@@ -1268,6 +1434,8 @@ fun ToolDetailSubSheet(
                                                 }
                                                 onUpdateProject(project.copy(clips = updatedClips))
                                             }
+                                            onShowToast("Speed: ${preset}x")
+                                            onClose() // Closes sheet on preset selection
                                         }
                                         .padding(horizontal = 8.dp, vertical = 3.dp)
                                 ) {
@@ -1397,9 +1565,32 @@ fun ToolDetailSubSheet(
                             }
                         }
                     }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Selected: ${activeClip?.filterName ?: "Normal"}",
+                            color = ElectricBlue,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Button(
+                            onClick = {
+                                onClose() // Closes Filters sheet
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = CobaltBlue),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Text("Done", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
 
-                // Bug 6 Fix: Adds effect to project.effects list and timeline
                 EditorTool.EFFECTS -> {
                     var selectedCat by remember { mutableStateOf(StudioPresets.effectCategories.first()) }
                     LazyRow(
@@ -1432,26 +1623,46 @@ fun ToolDetailSubSheet(
                             Column(
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 modifier = Modifier.clickable {
-                                    if (activeClip != null && selectedClipIndex in project.clips.indices) {
-                                        // Bug 6 Fix: Add effect to project.effects list so timeline displays it
-                                        val newEffect = EffectOverlay(
-                                            id = "fx_${System.currentTimeMillis()}",
-                                            name = fxName,
-                                            category = selectedCat,
-                                            startSec = 0f,
-                                            durationSec = project.durationSec.coerceAtLeast(5.0f)
-                                        )
-                                        val updatedClips = project.clips.mapIndexed { idx, c ->
-                                            if (idx == selectedClipIndex) c.copy(effectName = fxName) else c
+                                    val effectId = "fx_${System.currentTimeMillis()}"
+                                    val newEffect = EffectOverlay(
+                                        id = effectId,
+                                        name = fxName,
+                                        category = selectedCat,
+                                        startSec = currentPlayheadSec,
+                                        durationSec = 2f,
+                                        startTime = currentPlayheadSec,
+                                        duration = 2f
+                                    )
+                                    // Add to project.effects and activeClip.effects
+                                    val updatedEffects = project.effects + newEffect
+                                    val updatedClips = if (project.clips.isNotEmpty()) {
+                                        val targetIdx = selectedClipIndex.coerceIn(0, project.clips.lastIndex)
+                                        project.clips.mapIndexed { idx, c ->
+                                            if (idx == targetIdx) {
+                                                c.copy(
+                                                    effectName = fxName,
+                                                    effects = c.effects + newEffect
+                                                )
+                                            } else c
                                         }
-                                        onUpdateProject(
-                                            project.copy(
-                                                effects = listOf(newEffect),
-                                                clips = updatedClips
+                                    } else {
+                                        listOf(
+                                            VideoClip(
+                                                id = "clip_default",
+                                                title = project.videoFileName ?: "Clip",
+                                                durationSec = project.durationSec.coerceAtLeast(5.0f),
+                                                effectName = fxName,
+                                                effects = listOf(newEffect)
                                             )
                                         )
-                                        onShowToast("VFX Activated: $fxName")
                                     }
+                                    onUpdateProject(
+                                        project.copy(
+                                            effects = updatedEffects,
+                                            clips = updatedClips
+                                        )
+                                    )
+                                    onShowToast("VFX Activated: $fxName")
                                 }
                             ) {
                                 Box(
@@ -1472,6 +1683,30 @@ fun ToolDetailSubSheet(
                                     maxLines = 1
                                 )
                             }
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            if (project.effects.isNotEmpty()) "Active: ${project.effects.last().name}" else "Tap an effect to apply",
+                            color = AmberGold,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Button(
+                            onClick = {
+                                onClose() // Closes sheet with activeTool = NONE
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = CobaltBlue),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Text("Done", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }

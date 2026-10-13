@@ -14,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -24,6 +25,7 @@ import com.example.model.VideoClip
 import com.example.model.VideoProject
 import com.example.ui.screens.*
 import com.example.ui.theme.*
+import com.example.util.VideoImportManager
 
 enum class AppNavScreen {
     SPLASH,
@@ -53,6 +55,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun WSStudioApp() {
+    val context = LocalContext.current
     var currentScreen by remember { mutableStateOf(AppNavScreen.SPLASH) }
     var currentBottomTab by remember { mutableStateOf(MainBottomTab.HOME) }
 
@@ -133,18 +136,20 @@ fun WSStudioApp() {
                                 projects = projects,
                                 onNewProjectWithVideo = { uri, aspect ->
                                     val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "Gallery Video"
+                                    val realDurationMs = VideoImportManager.getRealDuration(context, uri)
+                                    val realDurationSec = realDurationMs / 1000.0f
                                     val newProject = VideoProject(
                                         id = "proj_${System.currentTimeMillis()}",
                                         title = fileName,
                                         aspect = aspect,
-                                        durationSec = 8.0f,
+                                        durationSec = realDurationSec,
                                         videoUri = uri.toString(),
                                         videoFileName = fileName,
                                         clips = listOf(
                                             VideoClip(
                                                 id = "clip_1",
                                                 title = fileName,
-                                                durationSec = 8.0f,
+                                                durationSec = realDurationSec,
                                                 videoUri = uri.toString(),
                                                 colorToneHex = 0xFF0D47A1
                                             )

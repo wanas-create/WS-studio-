@@ -17,6 +17,7 @@ class StudioPlayerManager(private val context: Context) {
     fun initializePlayer(
         videoUriString: String?,
         initialSpeed: Float = 1.0f,
+        playWhenReady: Boolean = false,
         onPlayStateChange: (isPlaying: Boolean) -> Unit
     ): ExoPlayer {
         releasePlayer()
@@ -25,6 +26,7 @@ class StudioPlayerManager(private val context: Context) {
         val player = ExoPlayer.Builder(context).build().apply {
             repeatMode = Player.REPEAT_MODE_OFF
             playbackParameters = PlaybackParameters(initialSpeed)
+            this.playWhenReady = playWhenReady
 
             addListener(object : Player.Listener {
                 override fun onIsPlayingChanged(isPlaying: Boolean) {

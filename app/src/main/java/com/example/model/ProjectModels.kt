@@ -21,7 +21,10 @@ data class VideoClip(
     val volume: Float = 1.0f,
     val transitionIn: String = "None",
     val colorToneHex: Long = 0xFF1E3A8A,
-    val videoUri: String? = null
+    val videoUri: String? = null,
+    val effects: List<EffectOverlay> = emptyList(),
+    val startMs: Long = (startOffsetSec * 1000f).toLong(),
+    val endMs: Long = ((startOffsetSec + durationSec) * 1000f).toLong()
 )
 
 data class AudioClip(
@@ -50,11 +53,13 @@ data class TextOverlay(
 
 data class EffectOverlay(
     val id: String,
-    val name: String,
-    val category: String,
+    val name: String = id,
+    val category: String = "Video Effects",
     val intensity: Float = 0.8f,
     val startSec: Float = 0f,
-    val durationSec: Float = 4f
+    val durationSec: Float = 2f,
+    val startTime: Float = startSec,
+    val duration: Float = durationSec
 )
 
 data class VideoProject(
