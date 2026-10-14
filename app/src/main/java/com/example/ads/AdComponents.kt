@@ -84,7 +84,7 @@ fun AdMobBanner(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            "Google AdMob • $adUnitId",
+                            "Google AdMob Sponsored",
                             color = TextMuted,
                             fontSize = 9.sp,
                             maxLines = 1
@@ -290,7 +290,7 @@ fun AppOpenAdDialog(
                     }
                 }
 
-                Text("AdMob Test Ad • Unit: $adUnitId", color = TextMuted, fontSize = 11.sp)
+                Text("Sponsored Partner Content", color = TextMuted, fontSize = 11.sp)
             }
         }
     }
@@ -298,21 +298,18 @@ fun AppOpenAdDialog(
 
 @Composable
 fun InterstitialAdDialog(
-    adUnitId: String = AdManager.INTERSTITIAL_ID,
+    adUnitId: String = AdManager.getInterstitialAdUnit(),
     title: String = "Export Complete Sponsored Preview",
     onDismiss: () -> Unit
 ) {
-    var timer by remember { mutableIntStateOf(4) }
-    LaunchedEffect(Unit) {
-        while (timer > 0) {
-            delay(1000)
-            timer--
-        }
-    }
-
+    // Interstitial must have immediate close button per AdMob policy without forced wait
     Dialog(
-        onDismissRequest = { if (timer <= 0) onDismiss() },
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+            usePlatformDefaultWidth = false
+        )
     ) {
         Box(
             modifier = Modifier
@@ -344,25 +341,17 @@ fun InterstitialAdDialog(
                         Text("Google AdMob Interstitial", color = TextSecondary, fontSize = 12.sp)
                     }
 
-                    if (timer > 0) {
-                        Box(
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(DarkSurfaceCard)
-                                .padding(horizontal = 12.dp, vertical = 6.dp)
-                        ) {
-                            Text("Close in $timer", color = TextMuted, fontSize = 12.sp)
-                        }
-                    } else {
-                        IconButton(
-                            onClick = onDismiss,
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .background(ElectricBlue)
-                        ) {
-                            Icon(Icons.Default.Close, contentDescription = "Close Ad", tint = Color.Black)
-                        }
+                    // Instant Close "X" button per AdMob policy
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(DarkSurfaceElevated)
+                            .border(1.dp, ElectricBlue.copy(alpha = 0.5f), CircleShape)
+                            .testTag("ad_close_button")
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Close Ad", tint = Color.White)
                     }
                 }
 
@@ -393,14 +382,14 @@ fun InterstitialAdDialog(
                 Column {
                     Button(
                         onClick = onDismiss,
-                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue)
                     ) {
-                        Text(if (timer > 0) "Please wait $timer s..." else "Continue to WS Studio", color = Color.Black, fontWeight = FontWeight.Bold)
+                        Text("Continue to WS Studio", color = Color.Black, fontWeight = FontWeight.Bold)
                     }
-                    Spacer(Modifier.height(8.dp))
-                    Text("Ad Unit: $adUnitId", color = TextMuted, fontSize = 10.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
                 }
             }
         }
@@ -458,7 +447,7 @@ fun RewardedAdDialog(
                         Text("Ad", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
 
-                    Text("Rewarded Ad • $adUnitId", color = TextMuted, fontSize = 11.sp)
+                    Text("Google AdMob Rewarded", color = TextMuted, fontSize = 11.sp)
 
                     if (rewardEarned) {
                         IconButton(

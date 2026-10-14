@@ -73,6 +73,7 @@ fun WSStudioApp() {
 
     var showRewardedAd by remember { mutableStateOf(false) }
     var onRewardedSuccessCallback by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var editorSessionEditCount by remember { mutableIntStateOf(0) }
 
     // Screen Router
     when (currentScreen) {
@@ -203,7 +204,18 @@ fun WSStudioApp() {
                 EditorScreen(
                     initialProject = editingProj,
                     onBack = {
-                        currentScreen = AppNavScreen.MAIN
+                        editorSessionEditCount++
+                        if (editorSessionEditCount >= 3) {
+                            editorSessionEditCount = 0
+                            interstitialTitle = "Project Saved to Home"
+                            onInterstitialDismissCallback = {
+                                currentScreen = AppNavScreen.MAIN
+                            }
+                            currentScreen = AppNavScreen.MAIN
+                            showInterstitialAd = true
+                        } else {
+                            currentScreen = AppNavScreen.MAIN
+                        }
                     },
                     onNavigateToExport = { updatedProject ->
                         projects = projects.map { if (it.id == updatedProject.id) updatedProject else it }
@@ -221,7 +233,20 @@ fun WSStudioApp() {
                 )
                 EditorScreen(
                     initialProject = emptyProject,
-                    onBack = { currentScreen = AppNavScreen.MAIN },
+                    onBack = {
+                        editorSessionEditCount++
+                        if (editorSessionEditCount >= 3) {
+                            editorSessionEditCount = 0
+                            interstitialTitle = "Project Saved to Home"
+                            onInterstitialDismissCallback = {
+                                currentScreen = AppNavScreen.MAIN
+                            }
+                            currentScreen = AppNavScreen.MAIN
+                            showInterstitialAd = true
+                        } else {
+                            currentScreen = AppNavScreen.MAIN
+                        }
+                    },
                     onNavigateToExport = { updatedProject ->
                         projects = listOf(updatedProject) + projects
                         activeEditingProject = updatedProject
@@ -269,14 +294,14 @@ fun WSStudioApp() {
     }
 
     // AppOpen Ad Modal on start
-    if (showAppOpenAd) {
+    if (showAppOpenAd && currentScreen != AppNavScreen.EDITOR) {
         AppOpenAdDialog(
             onDismiss = { showAppOpenAd = false }
         )
     }
 
-    // Interstitial Ad Modal (after export + after AI Hub)
-    if (showInterstitialAd) {
+    // Interstitial Ad Modal (only after export or returning to HomeScreen, NEVER inside EditorScreen)
+    if (showInterstitialAd && currentScreen != AppNavScreen.EDITOR) {
         InterstitialAdDialog(
             title = interstitialTitle,
             onDismiss = {
