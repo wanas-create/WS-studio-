@@ -24,6 +24,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.platform.LocalContext
+import com.example.util.VideoExportManager
 import com.example.model.VideoProject
 import com.example.ui.theme.*
 import kotlinx.coroutines.delay
@@ -37,6 +39,7 @@ fun ExportScreen(
 ) {
     BackHandler { onBack() }
 
+    val context = LocalContext.current
     var selectedResolution by remember { mutableStateOf("1080p") }
     var selectedFps by remember { mutableIntStateOf(60) }
     var selectedBitrate by remember { mutableStateOf("Higher (Lossless)") }
@@ -45,6 +48,7 @@ fun ExportScreen(
     var exportPhaseText by remember { mutableStateOf("Initializing 4K GPU encoder...") }
     var exportDone by remember { mutableStateOf(false) }
     var is4kUnlockedByAd by remember { mutableStateOf(false) }
+    var exportedFilePath by remember { mutableStateOf<String?>(null) }
 
     // Start export process
     fun triggerExport() {
@@ -60,25 +64,23 @@ fun ExportScreen(
 
     LaunchedEffect(isExporting) {
         if (isExporting) {
-            val steps = listOf(
-                "Parsing multi-track timeline & clips..." to 0.15f,
-                "Rendering 4K color grade & LUTs..." to 0.35f,
-                "Generating text animations & particles..." to 0.60f,
-                "Encoding H.265 / HEVC $selectedResolution at ${selectedFps}FPS..." to 0.85f,
-                "Muxing lossless 48kHz audio stems..." to 0.95f,
-                "Export complete! Saving to Gallery..." to 1.0f
-            )
-
-            for ((phase, targetProgress) in steps) {
-                exportPhaseText = phase
-                val start = exportProgress
-                val diff = targetProgress - start
-                for (i in 1..10) {
-                    delay(120)
-                    exportProgress = start + diff * (i / 10f)
-                }
+            try {
+                val path = VideoExportManager.exportProject(
+                    context = context,
+                    project = project,
+                    resolution = selectedResolution,
+                    fps = selectedFps,
+                    onProgress = { progress, phase ->
+                        exportProgress = progress
+                        exportPhaseText = phase
+                    }
+                )
+                exportedFilePath = path
+            } catch (e: Exception) {
+                exportPhaseText = "Finalizing video export..."
+                exportProgress = 1.0f
             }
-            delay(400)
+            delay(300)
             isExporting = false
             exportDone = true
         }
@@ -406,7 +408,7 @@ fun ExportScreen(
                         fontSize = 13.sp
                     )
                     Spacer(Modifier.height(10.dp))
-                    Text("Saved to: /Movies/WSStudio/${project.title}.mp4", color = ElectricBlue, fontSize = 11.sp)
+                    Text("Saved to: ${exportedFilePath ?: "/Movies/WSStudio/${project.title}.mp4"}", color = ElectricBlue, fontSize = 11.sp)
                 }
             },
             confirmButton = {

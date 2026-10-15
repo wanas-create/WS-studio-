@@ -24,6 +24,8 @@ data class ChatMessage(
     val aiName: String,
     val sender: String, // "user" or "ai"
     val text: String,
+    val isError: Boolean = false,
+    val errorType: String? = null,
     val mediaType: String = "text", // "text", "image", "video", "audio"
     val mediaTitle: String = "",
     val mediaSubtitle: String = "",
@@ -101,74 +103,7 @@ object AiCatalog {
         return emptyList()
     }
 
-    fun generateReply(engine: AiEngine, userQuery: String): ChatMessage {
-        val id = "reply_${System.currentTimeMillis()}"
-        return when (engine.category) {
-            AiCategory.TEXT -> {
-                ChatMessage(
-                    id = id,
-                    aiEngineId = engine.id,
-                    aiName = engine.name,
-                    sender = "ai",
-                    text = "🎬 **${engine.name} Video Production Strategy**\n\n" +
-                            "**Viral Hook (0-3s):**\n" +
-                            "\"Stop editing videos the slow way in 2026—here is the secret 4K workflow!\"\n\n" +
-                            "**Visual Scene Direction (3-15s):**\n" +
-                            "• Scene 1: Fast whip pan transition with RGB split.\n" +
-                            "• Scene 2: 120FPS slow-mo speed ramp with bass drop.\n" +
-                            "• Scene 3: Bold typography with neon glow font.\n\n" +
-                            "**Call to Action (15-20s):**\n" +
-                            "\"Exported in pristine 4K 60FPS with zero watermark in WS Studio. Tap link in bio!\"\n\n" +
-                            "🔥 *Suggested Hashtags:* #VideoEditing #CapCutPro #WSStudio #4KEdit #ContentCreator"
-                )
-            }
-            AiCategory.IMAGE -> {
-                ChatMessage(
-                    id = id,
-                    aiEngineId = engine.id,
-                    aiName = engine.name,
-                    sender = "ai",
-                    text = "Generated 4K UHD Concept Art for: \"$userQuery\"",
-                    mediaType = "image",
-                    mediaTitle = "${engine.name} 4K Asset Render",
-                    mediaSubtitle = "Resolution 3840x2160 • Color Grade: Rec.709 • Free for Commercial Use"
-                )
-            }
-            AiCategory.VIDEO -> {
-                ChatMessage(
-                    id = id,
-                    aiEngineId = engine.id,
-                    aiName = engine.name,
-                    sender = "ai",
-                    text = "Rendered high-dynamic video sequence with physics & cinematic camera motion:",
-                    mediaType = "video",
-                    mediaTitle = "${engine.name} Motion Clip",
-                    mediaSubtitle = "60 FPS • 4K H.265 • Ready to Add to Timeline",
-                    mediaDuration = "0:06"
-                )
-            }
-            AiCategory.AUDIO -> {
-                ChatMessage(
-                    id = id,
-                    aiEngineId = engine.id,
-                    aiName = engine.name,
-                    sender = "ai",
-                    text = "Rendered studio-grade audio track for your project:",
-                    mediaType = "audio",
-                    mediaTitle = "${engine.name} Studio Audio",
-                    mediaSubtitle = "Lossless WAV • 48kHz • 128 BPM Beat Synced",
-                    mediaDuration = "0:28"
-                )
-            }
-            AiCategory.ALL -> {
-                ChatMessage(
-                    id = id,
-                    aiEngineId = engine.id,
-                    aiName = engine.name,
-                    sender = "ai",
-                    text = "Processed query with ${engine.name}. All 50 models are synced with WS Studio timeline."
-                )
-            }
-        }
+    suspend fun queryEngine(engine: AiEngine, userQuery: String, history: List<ChatMessage> = emptyList()): ChatMessage {
+        return com.example.util.AiServiceManager.sendQuery(engine, userQuery, history)
     }
 }

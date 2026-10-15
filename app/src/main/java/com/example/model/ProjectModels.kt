@@ -17,6 +17,7 @@ data class VideoClip(
     val filterName: String = "Normal",
     val filterIntensity: Float = 0.8f,
     val effectName: String = "None",
+    val effectIntensity: Float = 0.8f,
     val isReversed: Boolean = false,
     val volume: Float = 1.0f,
     val transitionIn: String = "None",

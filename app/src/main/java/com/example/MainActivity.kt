@@ -135,14 +135,15 @@ fun WSStudioApp() {
                         MainBottomTab.HOME -> {
                             HomeScreen(
                                 projects = projects,
-                                onNewProjectWithVideo = { uri, aspect ->
+                                onNewProjectWithVideo = { uri, chosenAspect ->
                                     val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "Gallery Video"
-                                    val realDurationMs = VideoImportManager.getRealDuration(context, uri)
-                                    val realDurationSec = realDurationMs / 1000.0f
+                                    val videoInfo = VideoImportManager.getVideoInfo(context, uri)
+                                    val realDurationSec = videoInfo.durationSec
+                                    val effectiveAspect = if (chosenAspect != null) chosenAspect else videoInfo.effectiveAspect
                                     val newProject = VideoProject(
                                         id = "proj_${System.currentTimeMillis()}",
                                         title = fileName,
-                                        aspect = aspect,
+                                        aspect = effectiveAspect,
                                         durationSec = realDurationSec,
                                         videoUri = uri.toString(),
                                         videoFileName = fileName,
@@ -152,10 +153,13 @@ fun WSStudioApp() {
                                                 title = fileName,
                                                 durationSec = realDurationSec,
                                                 videoUri = uri.toString(),
-                                                colorToneHex = 0xFF0D47A1
+                                                colorToneHex = 0xFF0D47A1,
+                                                startOffsetSec = 0f,
+                                                startMs = 0L,
+                                                endMs = videoInfo.durationMs
                                             )
                                         ),
-                                        audioClips = emptyList() // No auto music
+                                        audioClips = emptyList()
                                     )
                                     projects = listOf(newProject) + projects
                                     activeEditingProject = newProject

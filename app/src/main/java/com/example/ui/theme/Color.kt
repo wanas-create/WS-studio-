@@ -34,3 +34,19 @@ val PlayheadRed = Color(0xFFFF1744)
 val PrimaryBlue = ElectricBlue
 val SecondaryBlue = CobaltBlue
 val SurfaceDark = DarkSurface
+
+// 50 AI Professional Black, White, and Blue Theme
+val AiMainBackground = Color(0xFF080B12)
+val AiCardSurface = Color(0xFF151B28)
+val AiCardSurfaceElevated = Color(0xFF1A2234)
+val AiPrimaryBlue = Color(0xFF2878FF)
+val AiTextWhite = Color(0xFFFFFFFF)
+val AiTextLightGrey = Color(0xFFAAB4C5)
+val AiTextDarkGrey = Color(0xFF6B7A90)
+val AiBorderSubtle = Color(0xFF1E2638)
+val AiUserBubbleBlue = Color(0xFF2878FF)
+val AiErrorCard = Color(0xFF2A151D)
+val AiErrorBorder = Color(0xFFFF4B6E)
+val AiWarningCard = Color(0xFF2A2215)
+val AiWarningBorder = Color(0xFFFFB300)
+

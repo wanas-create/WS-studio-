@@ -10,25 +10,31 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.*
 import com.example.ui.theme.*
-import kotlinx.coroutines.delay
+import com.example.util.AiServiceManager
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 @Composable
@@ -37,11 +43,12 @@ fun AiHubScreen(
 ) {
     BackHandler { onBackWithAd() }
 
-    var selectedEngineId by remember { mutableStateOf("chatgpt") }
+    var selectedEngineId by remember { mutableStateOf("gemini") }
     var selectedCategoryFilter by remember { mutableStateOf(AiCategory.ALL) }
     var messages by remember { mutableStateOf(AiCatalog.getInitialMessages()) }
     var inputText by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
+    var currentJob by remember { mutableStateOf<Job?>(null) }
 
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -59,120 +66,195 @@ fun AiHubScreen(
         }
     }
 
+    // Auto-scroll on new messages or when generation starts
+    LaunchedEffect(messages.size, isGenerating) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
+
+    fun cancelGeneration() {
+        currentJob?.cancel()
+        currentJob = null
+        if (isGenerating) {
+            isGenerating = false
+            messages = messages + ChatMessage(
+                id = "cancelled_${System.currentTimeMillis()}",
+                aiEngineId = activeEngine.id,
+                aiName = activeEngine.name,
+                sender = "ai",
+                text = "⏹️ Generation stopped by user.",
+                isError = false
+            )
+        }
+    }
+
     fun sendMessage(query: String) {
-        if (query.isBlank()) return
+        val trimmed = query.trim()
+        if (trimmed.isBlank() || isGenerating) return
+
         val userMsg = ChatMessage(
             id = "user_${System.currentTimeMillis()}",
             aiEngineId = activeEngine.id,
             aiName = activeEngine.name,
             sender = "user",
-            text = query
+            text = trimmed
         )
         messages = messages + userMsg
         inputText = ""
         isGenerating = true
 
-        coroutineScope.launch {
-            listState.animateScrollToItem(messages.size)
-            delay(1000) // Realistic AI generation delay
-            val aiReply = AiCatalog.generateReply(activeEngine, query)
-            messages = messages + aiReply
-            isGenerating = false
-            listState.animateScrollToItem(messages.size)
+        val job = coroutineScope.launch {
+            try {
+                val aiReply = AiCatalog.queryEngine(activeEngine, trimmed, messages)
+                messages = messages + aiReply
+            } catch (e: Exception) {
+                messages = messages + ChatMessage(
+                    id = "err_${System.currentTimeMillis()}",
+                    aiEngineId = activeEngine.id,
+                    aiName = activeEngine.name,
+                    sender = "ai",
+                    text = "⚠️ Request failed: ${e.localizedMessage ?: "Unknown error"}",
+                    isError = true,
+                    errorType = "EXCEPTION"
+                )
+            } finally {
+                isGenerating = false
+                currentJob = null
+            }
         }
+        currentJob = job
     }
 
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
+            .background(AiMainBackground)
             .testTag("ai_hub_screen"),
-        containerColor = DarkBackground,
+        containerColor = AiMainBackground,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(DarkSurface)
+                    .background(AiCardSurface)
+                    .statusBarsPadding()
             ) {
-                // Top header bar
+                // Top Header Row
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
                         IconButton(
                             onClick = onBackWithAd,
-                            modifier = Modifier.testTag("ai_hub_back_button")
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("ai_hub_back_button")
                         ) {
-                            Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary)
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = AiTextWhite
+                            )
                         }
+
                         Spacer(Modifier.width(4.dp))
+
                         Column {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    activeEngine.name,
-                                    color = TextPrimary,
-                                    fontSize = 16.sp,
+                                    text = activeEngine.name,
+                                    color = AiTextWhite,
+                                    fontSize = 17.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Spacer(Modifier.width(6.dp))
+
+                                val isActive = AiServiceManager.isEngineActive(activeEngine.id)
+                                val badgeBg = if (isActive) AiPrimaryBlue else Color(activeEngine.badgeColorHex)
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(4.dp))
-                                        .background(Color(activeEngine.badgeColorHex))
+                                        .background(badgeBg)
                                         .padding(horizontal = 6.dp, vertical = 2.dp)
                                 ) {
                                     Text(
-                                        activeEngine.tag,
+                                        text = if (isActive) "● LIVE" else activeEngine.tag,
                                         color = Color.White,
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                 }
                             }
+
                             Text(
-                                "50 AI in One Unified Chat • Switch anytime",
-                                color = TextMuted,
-                                fontSize = 11.sp
+                                text = "50 AI Studio Unified Hub • Real-time AI",
+                                color = AiTextLightGrey,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
 
+                    // Clear chat button
                     IconButton(
-                        onClick = { messages = AiCatalog.getInitialMessages() }
+                        onClick = {
+                            cancelGeneration()
+                            messages = emptyList()
+                        },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("ai_clear_chat_button")
                     ) {
-                        Icon(Icons.Default.DeleteOutline, contentDescription = "Clear Chat", tint = TextMuted)
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "Clear Chat",
+                            tint = AiTextLightGrey
+                        )
                     }
                 }
 
-                // Category Quick Filter Bar (All 50, Text, Image, Video, Audio)
+                HorizontalDivider(color = AiBorderSubtle, thickness = 1.dp)
+
+                // Category Quick Filter Tabs (All 50, Text, Image, Video, Audio)
                 LazyRow(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(AiCategory.values()) { cat ->
                         val isSelected = cat == selectedCategoryFilter
-                        FilterChip(
-                            selected = isSelected,
+                        Surface(
                             onClick = { selectedCategoryFilter = cat },
-                            label = {
+                            shape = RoundedCornerShape(20.dp),
+                            color = if (isSelected) AiPrimaryBlue else AiCardSurface,
+                            border = BorderStroke(
+                                1.dp,
+                                if (isSelected) AiPrimaryBlue else AiBorderSubtle
+                            ),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Text(
-                                    "${cat.icon} ${cat.label}",
-                                    fontSize = 11.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                    text = "${cat.icon} ${cat.label}",
+                                    color = if (isSelected) AiTextWhite else AiTextLightGrey,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                                 )
-                            },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = CobaltBlue,
-                                selectedLabelColor = Color.White,
-                                containerColor = DarkSurfaceElevated,
-                                labelColor = TextSecondary
-                            )
-                        )
+                            }
+                        }
                     }
                 }
 
@@ -185,14 +267,17 @@ fun AiHubScreen(
                 ) {
                     items(visibleEngines, key = { it.id }) { engine ->
                         val isSelected = engine.id == selectedEngineId
+                        val isConfigured = AiServiceManager.isEngineActive(engine.id)
+
                         Surface(
                             onClick = { selectedEngineId = engine.id },
                             shape = RoundedCornerShape(12.dp),
-                            color = if (isSelected) Color(engine.badgeColorHex).copy(alpha = 0.25f) else DarkSurfaceElevated,
+                            color = if (isSelected) AiPrimaryBlue.copy(alpha = 0.22f) else AiCardSurface,
                             border = BorderStroke(
                                 width = if (isSelected) 1.5.dp else 0.8.dp,
-                                color = if (isSelected) Color(engine.badgeColorHex) else DarkBorder
-                            )
+                                color = if (isSelected) AiPrimaryBlue else AiBorderSubtle
+                            ),
+                            modifier = Modifier.height(36.dp)
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -200,31 +285,44 @@ fun AiHubScreen(
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .size(10.dp)
+                                        .size(8.dp)
                                         .clip(CircleShape)
-                                        .background(Color(engine.badgeColorHex))
+                                        .background(
+                                            if (isConfigured) AiPrimaryBlue
+                                            else Color(engine.badgeColorHex)
+                                        )
                                 )
                                 Spacer(Modifier.width(6.dp))
                                 Text(
-                                    engine.name,
-                                    color = if (isSelected) Color.White else TextSecondary,
+                                    text = engine.name,
+                                    color = if (isSelected) AiTextWhite else AiTextLightGrey,
                                     fontSize = 12.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                                 )
                             }
                         }
                     }
                 }
+
+                HorizontalDivider(color = AiBorderSubtle, thickness = 1.dp)
             }
         },
         bottomBar = {
-            // WhatsApp-style message input dock
+            // Message Input Dock with proper soft keyboard & navigation insets
             Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = DarkSurface,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .imePadding(),
+                color = AiCardSurface,
+                border = BorderStroke(1.dp, AiBorderSubtle),
                 tonalElevation = 8.dp
             ) {
-                Column(modifier = Modifier.padding(10.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
                     // Suggested prompt pill
                     Row(
                         modifier = Modifier
@@ -236,25 +334,32 @@ fun AiHubScreen(
                         Surface(
                             onClick = { sendMessage(activeEngine.samplePrompt) },
                             shape = RoundedCornerShape(14.dp),
-                            color = DarkSurfaceElevated,
-                            border = BorderStroke(0.8.dp, ElectricBlue.copy(alpha = 0.4f))
+                            color = AiCardSurfaceElevated,
+                            border = BorderStroke(0.8.dp, AiPrimaryBlue.copy(alpha = 0.5f))
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Default.AutoFixNormal, contentDescription = null, tint = ElectricBlue, modifier = Modifier.size(12.dp))
-                                Spacer(Modifier.width(4.dp))
+                                Icon(
+                                    Icons.Default.AutoFixNormal,
+                                    contentDescription = null,
+                                    tint = AiPrimaryBlue,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(Modifier.width(5.dp))
                                 Text(
-                                    "Try: ${activeEngine.samplePrompt}",
-                                    color = ElectricBlue,
-                                    fontSize = 10.sp,
-                                    maxLines = 1
+                                    text = "Prompt: ${activeEngine.samplePrompt}",
+                                    color = AiPrimaryBlue,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
                     }
 
+                    // Input Text Field & Send/Stop Buttons
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -263,45 +368,80 @@ fun AiHubScreen(
                             value = inputText,
                             onValueChange = { inputText = it },
                             placeholder = {
-                                Text("Ask ${activeEngine.name}...", color = TextMuted, fontSize = 13.sp)
+                                Text(
+                                    text = "Ask ${activeEngine.name}...",
+                                    color = AiTextDarkGrey,
+                                    fontSize = 13.sp
+                                )
                             },
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("ai_chat_input"),
                             shape = RoundedCornerShape(24.dp),
+                            keyboardOptions = KeyboardOptions(
+                                imeAction = ImeAction.Send,
+                                keyboardType = KeyboardType.Text
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onSend = {
+                                    if (inputText.isNotBlank() && !isGenerating) {
+                                        sendMessage(inputText)
+                                    }
+                                }
+                            ),
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedContainerColor = DarkSurfaceElevated,
-                                unfocusedContainerColor = DarkSurfaceElevated,
-                                focusedBorderColor = Color(activeEngine.badgeColorHex),
-                                unfocusedBorderColor = DarkBorder,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
+                                focusedContainerColor = AiCardSurfaceElevated,
+                                unfocusedContainerColor = AiCardSurfaceElevated,
+                                focusedBorderColor = AiPrimaryBlue,
+                                unfocusedBorderColor = AiBorderSubtle,
+                                focusedTextColor = AiTextWhite,
+                                unfocusedTextColor = AiTextWhite,
+                                cursorColor = AiPrimaryBlue
                             ),
                             maxLines = 3
                         )
 
                         Spacer(Modifier.width(8.dp))
 
-                        IconButton(
-                            onClick = { sendMessage(inputText) },
-                            enabled = inputText.isNotBlank() && !isGenerating,
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clip(CircleShape)
-                                .background(if (inputText.isNotBlank()) Color(activeEngine.badgeColorHex) else DarkSurfaceElevated)
-                                .testTag("ai_send_button")
-                        ) {
-                            if (isGenerating) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(20.dp),
-                                    color = Color.White,
-                                    strokeWidth = 2.dp
-                                )
-                            } else {
+                        if (isGenerating) {
+                            // Working Stop/Cancel Button
+                            IconButton(
+                                onClick = { cancelGeneration() },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(AiCardSurfaceElevated)
+                                    .border(1.dp, AiBorderSubtle, CircleShape)
+                                    .testTag("ai_stop_button")
+                            ) {
                                 Icon(
-                                    Icons.Default.Send,
+                                    Icons.Default.Stop,
+                                    contentDescription = "Stop",
+                                    tint = Color(0xFFFF4B6E),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        } else {
+                            // Primary Send Button
+                            val canSend = inputText.isNotBlank()
+                            IconButton(
+                                onClick = { sendMessage(inputText) },
+                                enabled = canSend,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(if (canSend) AiPrimaryBlue else AiCardSurfaceElevated)
+                                    .border(
+                                        1.dp,
+                                        if (canSend) AiPrimaryBlue else AiBorderSubtle,
+                                        CircleShape
+                                    )
+                                    .testTag("ai_send_button")
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.Send,
                                     contentDescription = "Send",
-                                    tint = if (inputText.isNotBlank()) Color.White else TextMuted
+                                    tint = if (canSend) Color.White else AiTextDarkGrey
                                 )
                             }
                         }
@@ -323,39 +463,50 @@ fun AiHubScreen(
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated),
-                    border = BorderStroke(0.8.dp, DarkBorder)
+                    colors = CardDefaults.cardColors(containerColor = AiCardSurface),
+                    border = BorderStroke(1.dp, AiBorderSubtle)
                 ) {
                     Row(
-                        modifier = Modifier.padding(12.dp),
+                        modifier = Modifier.padding(14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(40.dp)
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(Color(activeEngine.badgeColorHex)),
+                                .background(AiPrimaryBlue.copy(alpha = 0.2f))
+                                .border(1.dp, AiPrimaryBlue, RoundedCornerShape(8.dp)),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                activeEngine.name.take(1),
-                                color = Color.White,
+                                text = activeEngine.name.take(1),
+                                color = AiPrimaryBlue,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
+                                fontSize = 18.sp
                             )
                         }
-                        Spacer(Modifier.width(10.dp))
-                        Column {
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = activeEngine.name,
+                                    color = AiTextWhite,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "(${activeEngine.tag})",
+                                    color = AiTextLightGrey,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Spacer(Modifier.height(2.dp))
                             Text(
-                                "Connected to ${activeEngine.name} (${activeEngine.tag})",
-                                color = TextPrimary,
+                                text = activeEngine.description,
+                                color = AiTextLightGrey,
                                 fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                activeEngine.description,
-                                color = TextSecondary,
-                                fontSize = 11.sp
+                                lineHeight = 16.sp
                             )
                         }
                     }
@@ -367,26 +518,38 @@ fun AiHubScreen(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 40.dp, horizontal = 20.dp),
+                            .padding(vertical = 48.dp, horizontal = 24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Box(
                             modifier = Modifier
                                 .size(64.dp)
                                 .clip(CircleShape)
-                                .background(Color(activeEngine.badgeColorHex).copy(alpha = 0.15f)),
+                                .background(AiPrimaryBlue.copy(alpha = 0.15f))
+                                .border(1.dp, AiPrimaryBlue.copy(alpha = 0.3f), CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Default.ChatBubbleOutline, contentDescription = null, tint = Color(activeEngine.badgeColorHex), modifier = Modifier.size(32.dp))
+                            Icon(
+                                Icons.Default.ChatBubbleOutline,
+                                contentDescription = null,
+                                tint = AiPrimaryBlue,
+                                modifier = Modifier.size(32.dp)
+                            )
                         }
-                        Spacer(Modifier.height(14.dp))
-                        Text("No messages yet", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Spacer(Modifier.height(4.dp))
+                        Spacer(Modifier.height(16.dp))
                         Text(
-                            "Select any of the 50 AI models above or type a prompt below to generate scripts, 4K art, video clips, or audio.",
-                            color = TextMuted,
+                            text = "Start chatting with ${activeEngine.name}",
+                            color = AiTextWhite,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "Select any of the 50 AI models above or type a prompt below. Google Gemini is actively connected for live video scripts and creative direction.",
+                            color = AiTextLightGrey,
                             fontSize = 12.sp,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            textAlign = TextAlign.Center,
+                            lineHeight = 17.sp
                         )
                     }
                 }
@@ -401,21 +564,37 @@ fun AiHubScreen(
 
             if (isGenerating) {
                 item {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(8.dp)
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = AiCardSurface),
+                        border = BorderStroke(1.dp, AiPrimaryBlue.copy(alpha = 0.4f))
                     ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            color = ElectricBlue,
-                            strokeWidth = 2.dp
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "${activeEngine.name} is creating response...",
-                            color = TextMuted,
-                            fontSize = 11.sp
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(12.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                color = AiPrimaryBlue,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                text = "${activeEngine.name} is processing request...",
+                                color = AiTextLightGrey,
+                                fontSize = 12.sp,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = { cancelGeneration() },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text("Cancel", color = Color(0xFFFF4B6E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
             }
@@ -435,7 +614,7 @@ fun ChatMessageItem(
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
         Column(
-            modifier = Modifier.widthIn(max = 310.dp),
+            modifier = Modifier.widthIn(max = 320.dp),
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
         ) {
             // Sender badge
@@ -445,8 +624,8 @@ fun ChatMessageItem(
                     modifier = Modifier.padding(bottom = 4.dp, start = 4.dp)
                 ) {
                     Text(
-                        message.aiName,
-                        color = ElectricBlue,
+                        text = message.aiName,
+                        color = AiPrimaryBlue,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -460,14 +639,23 @@ fun ChatMessageItem(
                     bottomStart = if (isUser) 16.dp else 4.dp,
                     bottomEnd = if (isUser) 4.dp else 16.dp
                 ),
-                color = if (isUser) CobaltBlue else DarkSurfaceElevated,
-                border = if (!isUser) BorderStroke(0.8.dp, DarkBorder) else null
+                color = when {
+                    isUser -> AiUserBubbleBlue
+                    message.isError -> AiErrorCard
+                    else -> AiCardSurface
+                },
+                border = if (!isUser) {
+                    BorderStroke(
+                        1.dp,
+                        if (message.isError) AiErrorBorder else AiBorderSubtle
+                    )
+                } else null
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     // Text body
                     Text(
                         text = message.text,
-                        color = Color.White,
+                        color = AiTextWhite,
                         fontSize = 13.sp,
                         lineHeight = 18.sp
                     )
@@ -479,41 +667,39 @@ fun ChatMessageItem(
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(160.dp),
+                                    .height(140.dp),
                                 shape = RoundedCornerShape(10.dp),
-                                colors = CardDefaults.cardColors(containerColor = Color.Black)
+                                colors = CardDefaults.cardColors(containerColor = Color.Black),
+                                border = BorderStroke(1.dp, AiBorderSubtle)
                             ) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .background(
-                                            Brush.linearGradient(
-                                                listOf(
-                                                    Color(0xFF0F172A),
-                                                    Color(0xFF1E1B4B),
-                                                    CobaltBlue.copy(alpha = 0.5f)
-                                                )
-                                            )
-                                        )
+                                        .background(AiCardSurfaceElevated)
                                         .padding(10.dp)
                                 ) {
                                     Column(
                                         modifier = Modifier.align(Alignment.Center),
                                         horizontalAlignment = Alignment.CenterHorizontally
                                     ) {
-                                        Icon(Icons.Default.Image, contentDescription = null, tint = ElectricBlue, modifier = Modifier.size(36.dp))
+                                        Icon(
+                                            Icons.Default.Image,
+                                            contentDescription = null,
+                                            tint = AiPrimaryBlue,
+                                            modifier = Modifier.size(32.dp)
+                                        )
                                         Spacer(Modifier.height(6.dp))
-                                        Text(message.mediaTitle, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                        Text(message.mediaSubtitle, color = TextMuted, fontSize = 10.sp)
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .align(Alignment.BottomEnd)
-                                            .clip(RoundedCornerShape(4.dp))
-                                            .background(ElectricBlue)
-                                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                                    ) {
-                                        Text("+ Add to Video", color = Color.Black, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                        Text(
+                                            text = message.mediaTitle,
+                                            color = AiTextWhite,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
+                                        )
+                                        Text(
+                                            text = message.mediaSubtitle,
+                                            color = AiTextLightGrey,
+                                            fontSize = 10.sp
+                                        )
                                     }
                                 }
                             }
@@ -524,28 +710,39 @@ fun ChatMessageItem(
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(140.dp),
+                                    .height(130.dp),
                                 shape = RoundedCornerShape(10.dp),
-                                colors = CardDefaults.cardColors(containerColor = Color.Black)
+                                colors = CardDefaults.cardColors(containerColor = Color.Black),
+                                border = BorderStroke(1.dp, AiBorderSubtle)
                             ) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .background(
-                                            Brush.radialGradient(
-                                                listOf(NeonPurple.copy(alpha = 0.4f), Color(0xFF0A0F1D))
-                                            )
-                                        )
+                                        .background(AiCardSurfaceElevated)
                                         .padding(10.dp)
                                 ) {
                                     Column(
                                         modifier = Modifier.align(Alignment.Center),
                                         horizontalAlignment = Alignment.CenterHorizontally
                                     ) {
-                                        Icon(Icons.Default.SlowMotionVideo, contentDescription = null, tint = AmberGold, modifier = Modifier.size(36.dp))
+                                        Icon(
+                                            Icons.Default.SlowMotionVideo,
+                                            contentDescription = null,
+                                            tint = AmberGold,
+                                            modifier = Modifier.size(32.dp)
+                                        )
                                         Spacer(Modifier.height(6.dp))
-                                        Text(message.mediaTitle, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                        Text("${message.mediaDuration} • ${message.mediaSubtitle}", color = TextSecondary, fontSize = 10.sp)
+                                        Text(
+                                            text = message.mediaTitle,
+                                            color = AiTextWhite,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
+                                        )
+                                        Text(
+                                            text = "${message.mediaDuration} • ${message.mediaSubtitle}",
+                                            color = AiTextLightGrey,
+                                            fontSize = 10.sp
+                                        )
                                     }
                                 }
                             }
@@ -556,8 +753,8 @@ fun ChatMessageItem(
                             var isPlayingAudio by remember { mutableStateOf(false) }
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
-                                color = DarkSurfaceCard,
-                                border = BorderStroke(0.8.dp, EmeraldGreen.copy(alpha = 0.4f))
+                                color = AiCardSurfaceElevated,
+                                border = BorderStroke(1.dp, EmeraldGreen.copy(alpha = 0.4f))
                             ) {
                                 Row(
                                     modifier = Modifier
@@ -580,16 +777,30 @@ fun ChatMessageItem(
                                     }
                                     Spacer(Modifier.width(10.dp))
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(message.mediaTitle, color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                        Text(message.mediaSubtitle, color = TextMuted, fontSize = 9.sp)
+                                        Text(
+                                            text = message.mediaTitle,
+                                            color = AiTextWhite,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = message.mediaSubtitle,
+                                            color = AiTextLightGrey,
+                                            fontSize = 9.sp
+                                        )
                                     }
-                                    Text(message.mediaDuration, color = EmeraldGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    Text(
+                                        text = message.mediaDuration,
+                                        color = EmeraldGreen,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
                         }
                     }
 
-                    // Action bar (copy)
+                    // Copy action button
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -599,9 +810,14 @@ fun ChatMessageItem(
                     ) {
                         IconButton(
                             onClick = onCopy,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(24.dp)
                         ) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = TextMuted, modifier = Modifier.size(12.dp))
+                            Icon(
+                                Icons.Default.ContentCopy,
+                                contentDescription = "Copy message",
+                                tint = if (isUser) Color.White.copy(alpha = 0.7f) else AiTextLightGrey,
+                                modifier = Modifier.size(13.dp)
+                            )
                         }
                     }
                 }

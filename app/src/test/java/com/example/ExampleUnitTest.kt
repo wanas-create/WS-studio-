@@ -43,4 +43,40 @@ class ExampleUnitTest {
         assertTrue("Transitions count must be 50 or more", StudioPresets.transitions.size >= 50)
         assertTrue("Fonts count must be 50 or more", StudioPresets.fonts.size >= 50)
     }
+
+    @Test
+    fun testVideoClipEffectAndFilterIntensity() {
+        val clip = com.example.model.VideoClip(
+            id = "clip_1",
+            title = "Sample Video",
+            durationSec = 35.0f,
+            filterName = "Teal & Orange",
+            filterIntensity = 0.75f,
+            effectName = "Earthquake Shake",
+            effectIntensity = 0.9f
+        )
+        assertEquals("Sample Video", clip.title)
+        assertEquals(35.0f, clip.durationSec, 0.001f)
+        assertEquals("Teal & Orange", clip.filterName)
+        assertEquals(0.75f, clip.filterIntensity, 0.001f)
+        assertEquals("Earthquake Shake", clip.effectName)
+        assertEquals(0.9f, clip.effectIntensity, 0.001f)
+        assertEquals(35000L, clip.endMs)
+    }
+
+    @Test
+    fun testEffectOverlayCreationAndIntensity() {
+        val fx = com.example.model.EffectOverlay(
+            id = "fx_test",
+            name = "Magnetic Distortion",
+            category = "Glitch & VHS",
+            intensity = 0.85f,
+            startSec = 5.0f,
+            durationSec = 2.0f
+        )
+        assertEquals("Magnetic Distortion", fx.name)
+        assertEquals(0.85f, fx.intensity, 0.001f)
+        assertEquals(5.0f, fx.startSec, 0.001f)
+        assertEquals(2.0f, fx.durationSec, 0.001f)
+    }
 }

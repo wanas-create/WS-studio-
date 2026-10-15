@@ -31,10 +31,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import android.graphics.Bitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.ui.PlayerView
 import com.example.model.*
 import com.example.ui.theme.*
+import com.example.util.ThumbnailManager
 import com.example.util.VideoImportManager
 import kotlinx.coroutines.delay
 
@@ -85,6 +90,25 @@ fun EditorScreen(
     // Studio Player Manager with ExoPlayer and playback synchronization
     val playerManager = remember { StudioPlayerManager(context) }
 
+    // Filmstrip video frame thumbnails extracted across timeline
+    var timelineThumbnails by remember(project.videoUri, project.durationSec) {
+        mutableStateOf<List<Bitmap>>(emptyList())
+    }
+
+    LaunchedEffect(project.videoUri, project.durationSec) {
+        val uri = project.videoUri
+        if (!uri.isNullOrEmpty() && project.durationSec > 0f) {
+            timelineThumbnails = ThumbnailManager.getThumbnails(
+                context = context,
+                uriString = uri,
+                durationSec = project.durationSec,
+                targetCount = 8
+            )
+        } else {
+            timelineThumbnails = emptyList()
+        }
+    }
+
     DisposableEffect(project.videoUri) {
         val activeClip = project.clips.getOrNull(selectedClipIndex)
         val initialSpeed = activeClip?.speed ?: 1.0f
@@ -97,6 +121,7 @@ fun EditorScreen(
         )
         onDispose {
             playerManager.releasePlayer()
+            ThumbnailManager.clearCache()
         }
     }
 
@@ -105,19 +130,25 @@ fun EditorScreen(
     ) { uri: Uri? ->
         if (uri != null) {
             val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "Gallery Video"
-            val realDurationMs = VideoImportManager.getRealDuration(context, uri)
-            val realDurationSec = realDurationMs / 1000.0f
+            val videoInfo = VideoImportManager.getVideoInfo(context, uri)
+            val realDurationSec = videoInfo.durationSec
+            val aspect = videoInfo.effectiveAspect
             val newClip = VideoClip(
                 id = "clip_${System.currentTimeMillis()}",
                 title = fileName,
                 durationSec = realDurationSec,
                 videoUri = uri.toString(),
-                colorToneHex = 0xFF0D47A1
+                colorToneHex = 0xFF0D47A1,
+                startOffsetSec = 0f,
+                startMs = 0L,
+                endMs = videoInfo.durationMs
             )
+            ThumbnailManager.clearCache()
             project = project.copy(
                 videoUri = uri.toString(),
                 videoFileName = fileName,
                 durationSec = realDurationSec,
+                aspect = aspect,
                 clips = listOf(newClip)
             )
             currentPlayheadSec = 0f
@@ -128,18 +159,18 @@ fun EditorScreen(
                 playWhenReady = false,
                 onPlayStateChange = { playing -> isPlaying = playing }
             )
-            showToastMessage = "Video loaded from gallery"
+            showToastMessage = "Video imported (${String.format("%.1f", realDurationSec)}s • ${aspect.label})"
         }
     }
 
     // High precision Player.Listener / Playback loop to synchronize playhead, timeText, and timelineView
     LaunchedEffect(isPlaying, project.durationSec, selectedClipIndex, project.clips) {
         while (isPlaying && project.durationSec > 0) {
-            delay(40) // 25 FPS live timeline progression
+            delay(33) // ~30 FPS live timeline progression
             val playerPosMs = playerManager.exoPlayer?.currentPosition
             if (playerPosMs != null && playerPosMs >= 0) {
                 val playerPosSec = (playerPosMs / 1000f).coerceIn(0f, project.durationSec)
-                if (playerPosSec >= project.durationSec && project.durationSec > 0) {
+                if (playerPosSec >= project.durationSec) {
                     currentPlayheadSec = 0f
                     isPlaying = false
                     playerManager.pause()
@@ -150,7 +181,7 @@ fun EditorScreen(
             } else {
                 val activeClip = project.clips.getOrNull(selectedClipIndex) ?: project.clips.firstOrNull()
                 val speed = activeClip?.speed ?: 1.0f
-                val delta = 0.04f * speed
+                val delta = 0.033f * speed
                 val nextTime = currentPlayheadSec + delta
                 if (nextTime >= project.durationSec) {
                     currentPlayheadSec = 0f
@@ -280,7 +311,14 @@ fun EditorScreen(
                         currentPlayheadSec = currentPlayheadSec,
                         isPlaying = isPlaying,
                         selectedClipIndex = selectedClipIndex,
-                        player = playerManager.exoPlayer
+                        player = playerManager.exoPlayer,
+                        onRemoveEffect = {
+                            val updatedClips = project.clips.mapIndexed { idx, c ->
+                                if (idx == selectedClipIndex) c.copy(effectName = "None") else c
+                            }
+                            project = project.copy(effects = emptyList(), clips = updatedClips)
+                            showToastMessage = "Removed effect"
+                        }
                     )
 
                     // Watermark status badge
@@ -360,6 +398,7 @@ fun EditorScreen(
                     selectedClipIndex = selectedClipIndex,
                     timelineZoom = timelineZoom,
                     isPlaying = isPlaying,
+                    timelineThumbnails = timelineThumbnails,
                     onSelectClip = { selectedClipIndex = it },
                     onSeek = { seekSec ->
                         currentPlayheadSec = seekSec.coerceIn(0f, project.durationSec)
@@ -631,10 +670,37 @@ fun VideoPreviewCanvas(
     currentPlayheadSec: Float,
     isPlaying: Boolean,
     selectedClipIndex: Int,
-    player: androidx.media3.common.Player? = null
+    player: androidx.media3.common.Player? = null,
+    onRemoveEffect: (() -> Unit)? = null
 ) {
     val activeClip = project.clips.getOrNull(selectedClipIndex) ?: project.clips.firstOrNull()
     val targetAspect = project.aspect.ratioWidth / project.aspect.ratioHeight
+
+    // Active effect resolution
+    val activeEffect = project.effects.firstOrNull {
+        currentPlayheadSec >= it.startSec && currentPlayheadSec <= (it.startSec + it.durationSec)
+    } ?: project.effects.lastOrNull()
+      ?: if (activeClip?.effectName != null && activeClip.effectName != "None") {
+          EffectOverlay(id = "clip_fx", name = activeClip.effectName, intensity = activeClip.effectIntensity)
+      } else null
+
+    val effectIntensity = (activeEffect?.intensity ?: 0.8f).coerceIn(0f, 1f)
+
+    // Motion & Shake camera translations
+    val isShakeEffect = activeEffect != null && effectIntensity > 0.01f &&
+        (activeEffect.name.contains("Shake") || activeEffect.name.contains("Earthquake") || activeEffect.name.contains("Jitter") || activeEffect.name.contains("Bounce"))
+    val isZoomEffect = activeEffect != null && effectIntensity > 0.01f &&
+        (activeEffect.name.contains("Zoom") || activeEffect.name.contains("Heartbeat") || activeEffect.name.contains("Pulse"))
+
+    val shakeX = if (isShakeEffect) {
+        kotlin.math.sin(currentPlayheadSec * 35f) * 16f * effectIntensity
+    } else 0f
+    val shakeY = if (isShakeEffect) {
+        kotlin.math.cos(currentPlayheadSec * 28f) * 12f * effectIntensity
+    } else 0f
+    val zoomScale = if (isZoomEffect) {
+        1.0f + 0.08f * effectIntensity * kotlin.math.sin(currentPlayheadSec * 10f)
+    } else 1.0f
 
     Box(
         modifier = Modifier
@@ -645,153 +711,178 @@ fun VideoPreviewCanvas(
             .border(1.dp, DarkBorder, RoundedCornerShape(12.dp)),
         contentAlignment = Alignment.Center
     ) {
-        // Real ExoPlayer Video Surface
-        if (player != null && !project.videoUri.isNullOrEmpty()) {
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        useController = false
-                        resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        this.player = player
-                    }
-                },
-                update = { playerView ->
-                    if (playerView.player != player) {
-                        playerView.player = player
-                    }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            val baseColor = Color(activeClip?.colorToneHex ?: 0xFF0D47A1)
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(
-                                baseColor,
-                                baseColor.copy(alpha = 0.65f),
-                                Color(0xFF04060A)
+        // Video rendering container with camera shake / motion transformations
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    translationX = shakeX
+                    translationY = shakeY
+                    scaleX = zoomScale
+                    scaleY = zoomScale
+                }
+        ) {
+            // Real ExoPlayer Video Surface
+            if (player != null && !project.videoUri.isNullOrEmpty()) {
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            useController = false
+                            resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+                            this.player = player
+                        }
+                    },
+                    update = { playerView ->
+                        if (playerView.player != player) {
+                            playerView.player = player
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                val baseColor = Color(activeClip?.colorToneHex ?: 0xFF0D47A1)
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(
+                                    baseColor,
+                                    baseColor.copy(alpha = 0.65f),
+                                    Color(0xFF04060A)
+                                )
                             )
                         )
-                    )
-            )
-        }
+                )
+            }
 
-        // Live visual filter overlay simulation based on active filter
-        val filterName = activeClip?.filterName ?: "Normal"
-        if (filterName != "Normal") {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        when {
-                            filterName.contains("Teal") -> Color(0xFF00E5FF).copy(alpha = 0.22f)
-                            filterName.contains("Cyber") || filterName.contains("Violet") -> Color(0xFF7C4DFF).copy(alpha = 0.26f)
-                            filterName.contains("Vintage") || filterName.contains("Kodachrome") -> Color(0xFFFFB300).copy(alpha = 0.22f)
-                            filterName.contains("B&W") || filterName.contains("Monochrome") -> Color.Gray.copy(alpha = 0.38f)
-                            filterName.contains("Portrait") || filterName.contains("Skin") -> Color(0xFFFFCCBC).copy(alpha = 0.18f)
-                            filterName.contains("Anime") -> Color(0xFF29B6F6).copy(alpha = 0.20f)
-                            else -> Color(0xFF00B0FF).copy(alpha = 0.18f)
-                        }
-                    )
-            )
-        }
+            // Live visual filter overlay simulation scaled by filterIntensity (0% to 100%)
+            val filterName = activeClip?.filterName ?: "Normal"
+            val filterIntensity = (activeClip?.filterIntensity ?: 0.8f).coerceIn(0f, 1f)
 
-        // Effects shader visual simulation and overlay tint
-        val activeEffect = project.effects.firstOrNull { currentPlayheadSec >= it.startSec && currentPlayheadSec <= (it.startSec + it.durationSec) }
-            ?: project.effects.lastOrNull()
-            ?: if (activeClip?.effectName != null && activeClip.effectName != "None") EffectOverlay(id = "clip_fx", name = activeClip.effectName) else null
-
-        if (activeEffect != null) {
-            // Video brightness/contrast/mood tint overlay simulation
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        when {
-                            activeEffect.name.contains("Magnetic") || activeEffect.name.contains("Distortion") ->
-                                Color(0xFF00E5FF).copy(alpha = 0.22f)
-                            activeEffect.name.contains("Glitch") || activeEffect.name.contains("RGB") ->
-                                Color(0xFFFF0055).copy(alpha = 0.25f)
-                            activeEffect.name.contains("Neon") || activeEffect.name.contains("Bloom") || activeEffect.name.contains("Glow") ->
-                                Color(0xFF7C4DFF).copy(alpha = 0.28f)
-                            activeEffect.name.contains("VHS") || activeEffect.name.contains("CRT") || activeEffect.name.contains("Retro") ->
-                                Color(0xFFFFB300).copy(alpha = 0.22f)
-                            activeEffect.name.contains("Earthquake") || activeEffect.name.contains("Shake") ->
-                                Color(0xFFFF1744).copy(alpha = 0.22f)
-                            else -> Color(0xFF651FFF).copy(alpha = 0.20f)
-                        }
-                    )
-            )
-
-            // GL Shader visual simulation lines & glow
-            val activeEffectName = activeEffect.name
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val w = size.width
-                val h = size.height
-
-                when {
-                    activeEffectName.contains("Magnetic") || activeEffectName.contains("Glitch") || activeEffectName.contains("RGB") -> {
-                        // Magnetic Distortion / RGB Split scanlines & chromatic borders
-                        drawLine(
-                            color = Color.Cyan.copy(alpha = 0.45f),
-                            start = Offset(0f, h * 0.35f),
-                            end = Offset(w, h * 0.35f),
-                            strokeWidth = 3f
+            if (filterName != "Normal" && filterIntensity > 0.01f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            when {
+                                filterName.contains("Teal") || filterName.contains("Miami") ->
+                                    Color(0xFF00E5FF).copy(alpha = 0.38f * filterIntensity)
+                                filterName.contains("Cyber") || filterName.contains("Violet") || filterName.contains("Neon") ->
+                                    Color(0xFF7C4DFF).copy(alpha = 0.42f * filterIntensity)
+                                filterName.contains("Vintage") || filterName.contains("Kodachrome") || filterName.contains("Sepia") ->
+                                    Color(0xFFFFB300).copy(alpha = 0.36f * filterIntensity)
+                                filterName.contains("B&W") || filterName.contains("Monochrome") || filterName.contains("Noir") ->
+                                    Color.Gray.copy(alpha = 0.65f * filterIntensity)
+                                filterName.contains("Portrait") || filterName.contains("Skin") || filterName.contains("Glow") ->
+                                    Color(0xFFFFCCBC).copy(alpha = 0.30f * filterIntensity)
+                                filterName.contains("Anime") || filterName.contains("Ghibli") ->
+                                    Color(0xFF29B6F6).copy(alpha = 0.32f * filterIntensity)
+                                filterName.contains("Moody") || filterName.contains("Cold") ->
+                                    Color(0xFF1A237E).copy(alpha = 0.38f * filterIntensity)
+                                filterName.contains("Vibrant") || filterName.contains("Punch") ->
+                                    Color(0xFFFF4081).copy(alpha = 0.32f * filterIntensity)
+                                else -> Color(0xFF00B0FF).copy(alpha = 0.28f * filterIntensity)
+                            }
                         )
-                        drawLine(
-                            color = Color.Magenta.copy(alpha = 0.45f),
-                            start = Offset(0f, h * 0.65f),
-                            end = Offset(w, h * 0.65f),
-                            strokeWidth = 3f
+                )
+            }
+
+            // Effects shader visual simulation and overlay tint scaled by effectIntensity
+            if (activeEffect != null && effectIntensity > 0.01f) {
+                val activeEffectName = activeEffect.name
+
+                // Tint overlay
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            when {
+                                activeEffectName.contains("Magnetic") || activeEffectName.contains("Distortion") ->
+                                    Color(0xFF00E5FF).copy(alpha = 0.32f * effectIntensity)
+                                activeEffectName.contains("Glitch") || activeEffectName.contains("RGB") ->
+                                    Color(0xFFFF0055).copy(alpha = 0.35f * effectIntensity)
+                                activeEffectName.contains("Neon") || activeEffectName.contains("Bloom") || activeEffectName.contains("Glow") ->
+                                    Color(0xFF7C4DFF).copy(alpha = 0.38f * effectIntensity)
+                                activeEffectName.contains("VHS") || activeEffectName.contains("CRT") || activeEffectName.contains("Retro") ->
+                                    Color(0xFFFFB300).copy(alpha = 0.30f * effectIntensity)
+                                activeEffectName.contains("Earthquake") || activeEffectName.contains("Shake") ->
+                                    Color(0xFFFF1744).copy(alpha = 0.28f * effectIntensity)
+                                else -> Color(0xFF651FFF).copy(alpha = 0.28f * effectIntensity)
+                            }
                         )
-                    }
-                    activeEffectName.contains("VHS") || activeEffectName.contains("CRT") || activeEffectName.contains("Scan") -> {
-                        // CRT Scanlines
-                        val lineSpacing = 16f
-                        var y = 0f
-                        while (y < h) {
+                )
+
+                // GL Shader visual simulation lines & glow
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+
+                    when {
+                        activeEffectName.contains("Magnetic") || activeEffectName.contains("Glitch") || activeEffectName.contains("RGB") -> {
+                            // Magnetic Distortion / RGB Split scanlines & chromatic borders
                             drawLine(
-                                color = Color.White.copy(alpha = 0.08f),
-                                start = Offset(0f, y),
-                                end = Offset(w, y),
-                                strokeWidth = 1.5f
+                                color = Color.Cyan.copy(alpha = 0.65f * effectIntensity),
+                                start = Offset(0f, h * 0.35f),
+                                end = Offset(w, h * 0.35f),
+                                strokeWidth = 4f
                             )
-                            y += lineSpacing
+                            drawLine(
+                                color = Color.Magenta.copy(alpha = 0.65f * effectIntensity),
+                                start = Offset(0f, h * 0.65f),
+                                end = Offset(w, h * 0.65f),
+                                strokeWidth = 4f
+                            )
                         }
-                    }
-                    activeEffectName.contains("Neon") || activeEffectName.contains("Bloom") || activeEffectName.contains("Glow") -> {
-                        // Perimeter neon glow
-                        drawRect(
-                            brush = Brush.radialGradient(
-                                colors = listOf(Color.Transparent, Color(0xFF7C4DFF).copy(alpha = 0.35f))
+                        activeEffectName.contains("VHS") || activeEffectName.contains("CRT") || activeEffectName.contains("Scan") -> {
+                            // CRT Scanlines
+                            val lineSpacing = 16f
+                            var y = 0f
+                            while (y < h) {
+                                drawLine(
+                                    color = Color.White.copy(alpha = 0.15f * effectIntensity),
+                                    start = Offset(0f, y),
+                                    end = Offset(w, y),
+                                    strokeWidth = 1.5f
+                                )
+                                y += lineSpacing
+                            }
+                        }
+                        activeEffectName.contains("Neon") || activeEffectName.contains("Bloom") || activeEffectName.contains("Glow") -> {
+                            // Perimeter neon glow
+                            drawRect(
+                                brush = Brush.radialGradient(
+                                    colors = listOf(Color.Transparent, Color(0xFF7C4DFF).copy(alpha = 0.50f * effectIntensity))
+                                )
                             )
-                        )
-                    }
-                    activeEffectName.contains("Earthquake") || activeEffectName.contains("Shake") -> {
-                        // Jitter vignette
-                        drawRect(
-                            brush = Brush.radialGradient(
-                                colors = listOf(Color.Transparent, Color(0xFFFF5252).copy(alpha = 0.25f))
+                        }
+                        activeEffectName.contains("Earthquake") || activeEffectName.contains("Shake") -> {
+                            // Jitter vignette
+                            drawRect(
+                                brush = Brush.radialGradient(
+                                    colors = listOf(Color.Transparent, Color(0xFFFF5252).copy(alpha = 0.35f * effectIntensity))
+                                )
                             )
-                        )
+                        }
                     }
                 }
             }
+        }
 
-            // Show effect name on top of video preview
-            Box(
+        // Active Effect Title & Intensity Pill with Remove Option
+        if (activeEffect != null && effectIntensity > 0.01f) {
+            Surface(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 10.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color.Black.copy(alpha = 0.75f))
-                    .border(1.dp, AmberGold, RoundedCornerShape(16.dp))
-                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .padding(top = 10.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = Color.Black.copy(alpha = 0.8f),
+                border = BorderStroke(1.dp, AmberGold)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Icon(
                         Icons.Default.AutoAwesome,
                         contentDescription = null,
@@ -800,11 +891,22 @@ fun VideoPreviewCanvas(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        "Effect: ${activeEffect.name}",
+                        "${activeEffect.name} • ${(effectIntensity * 100).toInt()}%",
                         color = Color.White,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold
                     )
+                    if (onRemoveEffect != null) {
+                        Spacer(Modifier.width(8.dp))
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Remove effect",
+                            tint = Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier
+                                .size(14.dp)
+                                .clickable { onRemoveEffect() }
+                        )
+                    }
                 }
             }
         }
@@ -968,6 +1070,7 @@ fun MultiTrackTimeline(
     selectedClipIndex: Int,
     timelineZoom: Float,
     isPlaying: Boolean,
+    timelineThumbnails: List<Bitmap> = emptyList(),
     onSelectClip: (Int) -> Unit,
     onSeek: (Float) -> Unit
 ) {
@@ -978,11 +1081,17 @@ fun MultiTrackTimeline(
     LaunchedEffect(currentPlayheadSec, isPlaying) {
         if (isPlaying) {
             val playheadPx = (currentPlayheadSec * pixelsPerSec).toInt()
-            val viewportCenterOffset = 200
-            val targetScroll = (playheadPx - viewportCenterOffset).coerceAtLeast(0)
-            if (kotlin.math.abs(scrollState.value - targetScroll) > 10) {
-                scrollState.scrollTo(targetScroll)
+            if (kotlin.math.abs(scrollState.value - playheadPx) > 8) {
+                scrollState.scrollTo(playheadPx)
             }
+        }
+    }
+
+    // Live scrubbing while dragging/scrolling timeline while paused
+    LaunchedEffect(scrollState.value) {
+        if (!isPlaying && project.durationSec > 0f && scrollState.isScrollInProgress) {
+            val scrubSec = (scrollState.value / pixelsPerSec).coerceIn(0f, project.durationSec)
+            onSeek(scrubSec)
         }
     }
 
@@ -1018,6 +1127,9 @@ fun MultiTrackTimeline(
                             modifier = Modifier
                                 .width((step * pixelsPerSec).dp)
                                 .fillMaxHeight()
+                                .clickable {
+                                    onSeek((i * step).toFloat().coerceIn(0f, project.durationSec))
+                                }
                         ) {
                             Text(
                                 "${i * step}s",
@@ -1029,11 +1141,11 @@ fun MultiTrackTimeline(
                     }
                 }
 
-                // Track 1: Video Clips Track
+                // Track 1: Video Clips Track with Real Frame Thumbnails Filmstrip
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(52.dp)
+                        .height(54.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(DarkSurfaceElevated),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -1042,32 +1154,86 @@ fun MultiTrackTimeline(
                         val isSelected = index == selectedClipIndex
                         Box(
                             modifier = Modifier
-                                .width((clip.durationSec * pixelsPerSec).dp)
+                                .width((clip.durationSec * pixelsPerSec).coerceAtLeast(60f).dp)
                                 .fillMaxHeight()
                                 .clip(RoundedCornerShape(6.dp))
-                                .background(Color(clip.colorToneHex))
+                                .background(Color(0xFF0F172A))
                                 .border(
                                     width = if (isSelected) 2.dp else 0.5.dp,
                                     color = if (isSelected) ElectricBlue else Color.White.copy(alpha = 0.3f),
                                     shape = RoundedCornerShape(6.dp)
                                 )
-                                .clickable { onSelectClip(index) }
-                                .padding(horizontal = 6.dp, vertical = 4.dp)
+                                .clickable {
+                                    onSelectClip(index)
+                                }
                         ) {
-                            Column {
-                                Text(
-                                    clip.title,
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1
-                                )
-                                val speedDisplay = String.format("%.2f", clip.speed)
-                                Text(
-                                    "${String.format("%.1f", clip.durationSec)}s • ${speedDisplay}x",
-                                    color = Color.White.copy(alpha = 0.85f),
-                                    fontSize = 9.sp
-                                )
+                            // Multiple real thumbnails across timeline filmstrip
+                            if (timelineThumbnails.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.SpaceEvenly
+                                ) {
+                                    timelineThumbnails.forEach { bmp ->
+                                        if (!bmp.isRecycled) {
+                                            Image(
+                                                bitmap = bmp.asImageBitmap(),
+                                                contentDescription = "Video Frame",
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .fillMaxHeight()
+                                                    .border(0.2.dp, Color.Black.copy(alpha = 0.4f)),
+                                                contentScale = ContentScale.Crop
+                                            )
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Elegant filmstrip skeleton while extracting frames
+                                Row(modifier = Modifier.fillMaxSize()) {
+                                    val slots = clip.durationSec.toInt().coerceIn(4, 10)
+                                    for (s in 0 until slots) {
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .fillMaxHeight()
+                                                .background(if (s % 2 == 0) Color(0xFF1E293B) else Color(0xFF0F172A))
+                                                .border(0.5.dp, Color.White.copy(alpha = 0.05f))
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Dark gradient header badge with clip info
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.verticalGradient(
+                                            listOf(
+                                                Color.Black.copy(alpha = 0.70f),
+                                                Color.Transparent,
+                                                Color.Black.copy(alpha = 0.60f)
+                                            )
+                                        )
+                                    )
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Column(modifier = Modifier.align(Alignment.TopStart)) {
+                                    Text(
+                                        clip.title,
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
+                                    )
+                                    val speedDisplay = String.format("%.2f", clip.speed)
+                                    Text(
+                                        "${String.format("%.1f", clip.durationSec)}s • ${speedDisplay}x${if (clip.filterName != "Normal") " • ${clip.filterName}" else ""}",
+                                        color = Color.White.copy(alpha = 0.9f),
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
                             }
                         }
                     }
@@ -1523,6 +1689,36 @@ fun ToolDetailSubSheet(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
+                        // Original / None filter button
+                        item {
+                            val isNoneSelected = activeClip?.filterName == "Normal"
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.clickable {
+                                    if (activeClip != null && selectedClipIndex in project.clips.indices) {
+                                        val updatedClips = project.clips.mapIndexed { idx, c ->
+                                            if (idx == selectedClipIndex) c.copy(filterName = "Normal", filterIntensity = 0.8f) else c
+                                        }
+                                        onUpdateProject(project.copy(clips = updatedClips))
+                                        onShowToast("Original Video (Filter cleared)")
+                                    }
+                                }
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (isNoneSelected) ElectricBlue.copy(alpha = 0.3f) else DarkSurfaceElevated)
+                                        .border(if (isNoneSelected) 2.dp else 1.dp, if (isNoneSelected) ElectricBlue else DarkBorder, RoundedCornerShape(10.dp)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Icons.Default.Block, contentDescription = "Original", tint = Color.White, modifier = Modifier.size(20.dp))
+                                }
+                                Spacer(Modifier.height(2.dp))
+                                Text("Original", color = if (isNoneSelected) ElectricBlue else TextSecondary, fontSize = 9.sp)
+                            }
+                        }
+
                         items(filteredList) { filter ->
                             val isSelected = activeClip?.filterName == filter.displayName
                             Column(
@@ -1546,7 +1742,6 @@ fun ToolDetailSubSheet(
                                         .border(if (isSelected) 2.dp else 0.dp, ElectricBlue, RoundedCornerShape(10.dp)),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    // Bug 5 Fix: Unique 2-letter badge instead of repeating "MA"
                                     Text(
                                         filter.badge,
                                         color = Color.White,
@@ -1555,7 +1750,6 @@ fun ToolDetailSubSheet(
                                     )
                                 }
                                 Spacer(Modifier.height(2.dp))
-                                // Bug 5 Fix: Full displayName
                                 Text(
                                     filter.displayName.take(12),
                                     color = if (isSelected) ElectricBlue else TextSecondary,
@@ -1567,6 +1761,37 @@ fun ToolDetailSubSheet(
                     }
 
                     Spacer(Modifier.height(8.dp))
+
+                    // Working Intensity Slider from 0% to 100%
+                    val currentFilterIntensity = activeClip?.filterIntensity ?: 0.8f
+                    if (activeClip?.filterName != "Normal") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Intensity", color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.width(8.dp))
+                            Slider(
+                                value = currentFilterIntensity,
+                                onValueChange = { newIntensity ->
+                                    if (activeClip != null && selectedClipIndex in project.clips.indices) {
+                                        val updatedClips = project.clips.mapIndexed { idx, c ->
+                                            if (idx == selectedClipIndex) c.copy(filterIntensity = newIntensity) else c
+                                        }
+                                        onUpdateProject(project.copy(clips = updatedClips))
+                                    }
+                                },
+                                valueRange = 0f..1f,
+                                modifier = Modifier.weight(1f),
+                                colors = SliderDefaults.colors(thumbColor = ElectricBlue, activeTrackColor = CobaltBlue)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("${(currentFilterIntensity * 100).toInt()}%", color = ElectricBlue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                    }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1614,10 +1839,40 @@ fun ToolDetailSubSheet(
                     Spacer(Modifier.height(8.dp))
 
                     val effectItems = StudioPresets.effects.filter { it.second == selectedCat }
+                    val currentEffectIntensity = (project.effects.lastOrNull()?.intensity ?: activeClip?.effectIntensity ?: 0.8f).coerceIn(0f, 1f)
+
                     LazyRow(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
+                        // Option for None / Remove Effects
+                        item {
+                            val isNoneActive = project.effects.isEmpty() && (activeClip?.effectName == null || activeClip.effectName == "None")
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.clickable {
+                                    val updatedClips = project.clips.mapIndexed { idx, c ->
+                                        if (idx == selectedClipIndex) c.copy(effectName = "None", effectIntensity = 0.8f) else c
+                                    }
+                                    onUpdateProject(project.copy(effects = emptyList(), clips = updatedClips))
+                                    onShowToast("Removed effects")
+                                }
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (isNoneActive) AmberGold.copy(alpha = 0.3f) else DarkSurfaceElevated)
+                                        .border(if (isNoneActive) 2.dp else 1.dp, if (isNoneActive) AmberGold else DarkBorder, RoundedCornerShape(10.dp)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Icons.Default.Block, contentDescription = "None", tint = Color.White, modifier = Modifier.size(20.dp))
+                                }
+                                Spacer(Modifier.height(2.dp))
+                                Text("None", color = if (isNoneActive) AmberGold else TextSecondary, fontSize = 9.sp)
+                            }
+                        }
+
                         items(effectItems) { (fxName, _) ->
                             val isEffectActive = project.effects.any { it.name == fxName } || activeClip?.effectName == fxName
                             Column(
@@ -1628,6 +1883,7 @@ fun ToolDetailSubSheet(
                                         id = effectId,
                                         name = fxName,
                                         category = selectedCat,
+                                        intensity = currentEffectIntensity,
                                         startSec = currentPlayheadSec,
                                         durationSec = 2f,
                                         startTime = currentPlayheadSec,
@@ -1641,6 +1897,7 @@ fun ToolDetailSubSheet(
                                             if (idx == targetIdx) {
                                                 c.copy(
                                                     effectName = fxName,
+                                                    effectIntensity = currentEffectIntensity,
                                                     effects = c.effects + newEffect
                                                 )
                                             } else c
@@ -1652,6 +1909,7 @@ fun ToolDetailSubSheet(
                                                 title = project.videoFileName ?: "Clip",
                                                 durationSec = project.durationSec.coerceAtLeast(5.0f),
                                                 effectName = fxName,
+                                                effectIntensity = currentEffectIntensity,
                                                 effects = listOf(newEffect)
                                             )
                                         )
@@ -1688,17 +1946,65 @@ fun ToolDetailSubSheet(
 
                     Spacer(Modifier.height(8.dp))
 
+                    // Working Effect Intensity Slider from 0% to 100%
+                    val hasActiveEffect = project.effects.isNotEmpty() || (activeClip?.effectName != null && activeClip.effectName != "None")
+                    if (hasActiveEffect) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Intensity", color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.width(8.dp))
+                            Slider(
+                                value = currentEffectIntensity,
+                                onValueChange = { newIntensity ->
+                                    val updatedEffects = project.effects.map { it.copy(intensity = newIntensity) }
+                                    val updatedClips = project.clips.mapIndexed { idx, c ->
+                                        if (idx == selectedClipIndex) c.copy(effectIntensity = newIntensity) else c
+                                    }
+                                    onUpdateProject(project.copy(effects = updatedEffects, clips = updatedClips))
+                                },
+                                valueRange = 0f..1f,
+                                modifier = Modifier.weight(1f),
+                                colors = SliderDefaults.colors(thumbColor = AmberGold, activeTrackColor = AmberGold)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("${(currentEffectIntensity * 100).toInt()}%", color = AmberGold, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            if (project.effects.isNotEmpty()) "Active: ${project.effects.last().name}" else "Tap an effect to apply",
-                            color = AmberGold,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (project.effects.isNotEmpty()) "Active: ${project.effects.last().name}" else if (activeClip?.effectName != null && activeClip.effectName != "None") "Active: ${activeClip.effectName}" else "Tap an effect to apply",
+                                color = AmberGold,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            if (hasActiveEffect) {
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "Remove",
+                                    color = PlayheadRed,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.clickable {
+                                        val updatedClips = project.clips.mapIndexed { idx, c ->
+                                            if (idx == selectedClipIndex) c.copy(effectName = "None") else c
+                                        }
+                                        onUpdateProject(project.copy(effects = emptyList(), clips = updatedClips))
+                                        onShowToast("Removed effects")
+                                    }
+                                )
+                            }
+                        }
                         Button(
                             onClick = {
                                 onClose() // Closes sheet with activeTool = NONE
